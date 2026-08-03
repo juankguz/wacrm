@@ -13,18 +13,20 @@ services:
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
         NEXT_PUBLIC_APP_LOCALE: ${NEXT_PUBLIC_APP_LOCALE:-en}
     # Runtime (server-only) secrets come from .env.local; they are
-    # never baked into the image.
+    # never baked into the image.  META_APP_SECRET, SUPABASE_SERVICE_ROLE_KEY,
+    # ENCRYPTION_KEY, AUTOMATION_CRON_SECRET, etc. must all be in .env.local.
     env_file:
-      - .env
-    # The server always listens on 3000 inside the container. Pinned
-    # here because `environment` wins over `env_file`, so a stray PORT
-    # in .env.local can't desync the app from the mapping and the
+      - .env.local
+    # The server always listens on 3000 inside the container.  Pinned here
+    # because `environment` wins over `env_file`, so a stray PORT in
+    # .env.local can't desync the app from the port mapping and the
     # healthcheck below.
     environment:
       PORT: 3000
-    # Host side only — HOST_PORT=8080 publishes the app on :8080.
+    # Host side only — HOST_PORT=3009 publishes the app on :3009.
+    # Inside the container the app is always on 3000.
     ports:
-      - '${HOST_PORT:-3000}:3000'
+      - '${HOST_PORT:-3009}:3000'
     restart: unless-stopped
     healthcheck:
       test:
