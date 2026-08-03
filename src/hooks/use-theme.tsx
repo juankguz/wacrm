@@ -77,8 +77,17 @@ function readInitialMode(): Mode {
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<ThemeId>(readInitialTheme);
-  const [mode, setModeState] = useState<Mode>(readInitialMode);
+  const [theme, setThemeState] = useState<ThemeId>(DEFAULT_THEME);
+  const [mode, setModeState] = useState<Mode>(DEFAULT_MODE);
+
+  // Read saved preference after hydration so the first client render
+  // matches the SSR output (avoiding hydration mismatch). The boot script
+  // has already painted the correct theme in the DOM before React mounts,
+  // so the page stays flash-free — React just catches up to the DOM.
+  useEffect(() => {
+    setThemeState(readInitialTheme);
+    setModeState(readInitialMode);
+  }, []);
 
   const setTheme = useCallback((next: ThemeId) => {
     setThemeState(next);
