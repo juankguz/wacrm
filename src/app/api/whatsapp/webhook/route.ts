@@ -33,7 +33,7 @@ function supabaseAdmin() {
   return _adminClient
 }
 
-interface WhatsAppMessage {
+export interface WhatsAppMessage {
   id: string
   from: string
   timestamp: string
@@ -56,6 +56,21 @@ interface WhatsAppMessage {
     type: 'button_reply' | 'list_reply'
     button_reply?: { id: string; title: string }
     list_reply?: { id: string; title: string; description?: string }
+  }
+  /**
+   * Set when the customer taps a quick-reply button inside a TEMPLATE we
+   * sent. Meta sends `message.type === 'button'` with this shape —
+   * distinct from `interactive.button_reply` (which only appears for
+   * taps on free-form interactive messages). `text` is what the
+   * customer saw on the button (locale-localized); `payload` is the
+   * stable id we set when defining the template (≤ 256 chars per
+   * Meta docs). At least one is typically present; the parser
+   * normalizes both to the same internal contract as `interactive.*`
+   * replies so Flows and Automations only need to know one wire shape.
+   */
+  button?: {
+    text?: string
+    payload?: string
   }
   /** Present when the customer swipe-replies to one of our messages. */
   context?: { id: string }
@@ -653,7 +668,10 @@ async function processMessage(
     ? message.type
     : message.type === 'sticker'
       ? 'image'   // stickers are images
-      : 'text'    // reaction, unknown → text fallback
+      : message.type === 'button'
+        ? 'interactive'   // template quick-reply buttons normalize to the
+                          // same internal contract as interactive.* replies
+        : 'text'    // reaction, unknown → text fallback
 
   // Determine whether this is the contact's very first inbound message
   // BEFORE we insert, so the count is accurate. Covers the case where
@@ -834,7 +852,7 @@ async function processMessage(
   })
 }
 
-async function parseMessageContent(
+export async function parseMessageContent(
   message: WhatsAppMessage,
   accessToken: string
 ): Promise<{
@@ -969,6 +987,29 @@ async function parseMessageContent(
         }
       }
       return { ...empty, contentText: '[Interactive reply]' }
+    }
+
+    case 'button': {
+      // Customer tapped a quick-reply button we put on a TEMPLATE we
+      // sent. Meta's wire shape is { text, payload } — distinct from
+      // `interactive.*`, but semantically the same thing: the customer
+      // picked an option from a menu we sent. Normalize to the same
+      // contract as `interactive.*` so Flows and Automations only need
+      // to know one wire shape:
+      //   - contentText = button.text (what they saw on the button),
+      //     falling back to button.payload if text is missing/blank
+      //   - interactiveReplyId = button.payload (the stable id Flows
+      //     and the `interactive_reply` automation trigger match on)
+      // Empty / missing both → return empty defaults rather than the
+      // "[Unsupported]" string, since "button" IS supported; we just
+      // have nothing useful to render.
+      const text = message.button?.text?.trim() || null
+      const payload = message.button?.payload?.trim() || null
+      return {
+        ...empty,
+        contentText: text ?? payload,
+        interactiveReplyId: payload,
+      }
     }
 
     default:
