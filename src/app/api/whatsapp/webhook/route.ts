@@ -2,8 +2,16 @@ import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
-import { normalizePhone } from '@/lib/whatsapp/phone-utils'
-import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
+import {
+  findExistingContact,
+  findExistingContactByBsuid,
+  isUniqueViolation,
+  type ExistingContact,
+} from '@/lib/contacts/dedupe'
+import {
+  resolveWhatsAppIdentity,
+  type ResolvedWhatsAppIdentity,
+} from '@/lib/whatsapp/resolve-identity'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
@@ -35,7 +43,13 @@ function supabaseAdmin() {
 
 export interface WhatsAppMessage {
   id: string
-  from: string
+  /** Phone number — may be OMITTED when the user adopted a username
+   *  (see Meta's BSUID docs). Use `from_user_id` (BSUID) in that case. */
+  from?: string
+  /** Business-scoped User ID (BSUID) — the stable new identity. */
+  from_user_id?: string
+  /** Parent BSUID — only for multi-portfolio enrollments; ignored. */
+  from_parent_user_id?: string
   timestamp: string
   type: string
   text?: { body: string }
@@ -46,6 +60,17 @@ export interface WhatsAppMessage {
   sticker?: { id: string; mime_type: string }
   location?: { latitude: number; longitude: number; name?: string; address?: string }
   reaction?: { message_id: string; emoji: string }
+  /**
+   * System messages (e.g. a user changed their phone number → BSUID
+   * rotated). `system.user_id` carries the NEW BSUID.
+   */
+  system?: {
+    body?: string
+    wa_id?: string
+    user_id?: string
+    parent_user_id?: string
+    type?: string
+  }
   /**
    * Set when the customer taps a button or list row on an interactive
    * message we sent. `button_reply.id` / `list_reply.id` is whatever id
@@ -86,15 +111,29 @@ interface WhatsAppWebhookEntry {
         phone_number_id: string
       }
       contacts?: Array<{
-        profile: { name: string }
-        wa_id: string
+        profile?: {
+          name?: string
+          username?: string
+        }
+        wa_id?: string
+        user_id?: string
+        parent_user_id?: string
       }>
       messages?: WhatsAppMessage[]
       statuses?: Array<{
         id: string
         status: string
         timestamp: string
-        recipient_id: string
+        recipient_id?: string
+        recipient_user_id?: string
+        recipient_parent_user_id?: string
+      }>
+      user_id_update?: Array<{
+        wa_id?: string
+        detail?: string
+        user_id?: { previous?: string; current?: string }
+        parent_user_id?: { previous?: string; current?: string }
+        timestamp?: string
       }>
     }
     field: string
@@ -248,6 +287,15 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
         continue
       }
 
+      // BSUID rotation: a user changed their phone number, so Meta
+      // issued a new BSUID. Update the contact's BSUID in place so we
+      // keep threading under the same contact. Best-effort — a failure
+      // here must not drop the webhook's 200.
+      if (change.field === 'user_id_update') {
+        await handleUserIdUpdate(change.value as WhatsAppWebhookEntry['changes'][number]['value'])
+        continue
+      }
+
       const value = change.value
 
       // Handle status updates
@@ -257,8 +305,10 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
         }
       }
 
-      // Handle incoming messages
-      if (!value.messages || !value.contacts) continue
+      // Handle incoming messages. `contacts` may be absent for system
+      // webhooks (e.g. a BSUID rotation) — those still carry a `messages`
+      // array we must process.
+      if (!value.messages) continue
 
       const phoneNumberId = value.metadata.phone_number_id
 
@@ -303,7 +353,7 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
 
       for (let i = 0; i < value.messages.length; i++) {
         const message = value.messages[i]
-        const contact = value.contacts[i] || value.contacts[0]
+        const contact = value.contacts?.[i] || value.contacts?.[0]
 
         await processMessage(
           message,
@@ -368,7 +418,8 @@ async function handleStatusUpdate(status: {
   id: string
   status: string
   timestamp: string
-  recipient_id: string
+  recipient_id?: string
+  recipient_user_id?: string
 }) {
   // 1) Mirror onto messages (legacy behavior) — Meta's status values
   //    already match the CHECK constraint on messages.status. No
@@ -574,7 +625,7 @@ async function handleReaction(
 
 async function processMessage(
   message: WhatsAppMessage,
-  contact: { profile: { name: string }; wa_id: string },
+  contact: { profile?: { name?: string; username?: string }; wa_id?: string; user_id?: string } | undefined,
   // Tenancy. Resolved from the matched whatsapp_config row; every
   // contact / conversation / message row created downstream is
   // stamped with this so any member of the account can see it.
@@ -585,15 +636,36 @@ async function processMessage(
   configOwnerUserId: string,
   accessToken: string
 ) {
-  const senderPhone = normalizePhone(message.from)
-  const contactName = contact.profile.name
+  const identity = resolveWhatsAppIdentity(contact, message)
+
+  // System message — a user changed their phone number, so Meta issued
+  // a new BSUID (system.type === 'user_changed_user_id'). Rotate the
+  // contact's BSUID in place and do NOT store a normal message.
+  if (message.type === 'system') {
+    const newBsuid = message.system?.user_id?.trim()
+    if (message.system?.type === 'user_changed_user_id' && newBsuid) {
+      await rotateContactBsuid(accountId, identity.phone, identity.whatsappUserId, newBsuid)
+    }
+    return
+  }
+
+  // No identity at all — refuse to create an empty contact (issue with
+  // the pre-BSUID flow: Meta omits the phone, we used to insert a row
+  // with phone='' and fragment the thread on every message). Log
+  // structured detail and drop without a contact row.
+  if (identity.source === 'unknown') {
+    console.error(
+      '[webhook] inbound message dropped — no usable WhatsApp identity (no BSUID, no phone).',
+      { messageId: message.id, type: message.type },
+    )
+    return
+  }
 
   // Find or create contact
   const contactOutcome = await findOrCreateContact(
     accountId,
     configOwnerUserId,
-    senderPhone,
-    contactName
+    identity
   )
   if (!contactOutcome) return
   const contactRecord = contactOutcome.contact
@@ -1033,27 +1105,56 @@ interface ContactOutcome {
 async function findOrCreateContact(
   accountId: string,
   configOwnerUserId: string,
-  phone: string,
-  name: string
+  identity: ResolvedWhatsAppIdentity
 ): Promise<ContactOutcome | null> {
-  // Find an existing contact for this account by phone. The shared
-  // helper pre-filters in SQL by the last-8-digit suffix (so we don't
-  // pull every contact on every inbound message) then applies the
-  // strict `phonesMatch` in JS on the small candidate set. The same
-  // helper backs the manual contact form and CSV import, so all three
-  // paths agree on what "same number" means (issue #212).
-  const existingContact = await findExistingContact(
-    supabaseAdmin(),
-    accountId,
-    phone,
-  )
+  const { whatsappUserId, phone, username, displayName } = identity
+
+  // 1) BSUID first — the stable new identity. Lookup is always
+  //    (account_id, whatsapp_user_id); the DB unique index (migration
+  //    037) is the backstop against races.
+  let existingContact: ExistingContact | null = null
+  if (whatsappUserId) {
+    existingContact = await findExistingContactByBsuid(
+      supabaseAdmin(),
+      accountId,
+      whatsappUserId,
+    )
+  }
+
+  // 2) Phone fallback — unchanged behaviour when a phone is present.
+  //    The shared helper pre-filters in SQL by the last-8-digit suffix
+  //    then applies `phonesMatch` in JS (issue #212). A BSUID-only
+  //    contact has phone='' and never matches here.
+  if (!existingContact && phone) {
+    existingContact = await findExistingContact(
+      supabaseAdmin(),
+      accountId,
+      phone,
+    )
+  }
 
   if (existingContact) {
-    // Update name if it changed
-    if (name && name !== existingContact.name) {
+    // Backfill the missing identity and fresher display fields. Never
+    // stomp an existing real phone with a different one.
+    const patch: Record<string, unknown> = {}
+    if (whatsappUserId && !existingContact.whatsapp_user_id) {
+      patch.whatsapp_user_id = whatsappUserId
+    }
+    if (phone && !existingContact.phone) {
+      patch.phone = phone
+    }
+    if (username && existingContact.whatsapp_username !== username) {
+      patch.whatsapp_username = username
+    }
+    const preferredName = displayName || username
+    if (preferredName && preferredName !== existingContact.name) {
+      patch.name = preferredName
+    }
+    if (Object.keys(patch).length > 0) {
+      patch.updated_at = new Date().toISOString()
       await supabaseAdmin()
         .from('contacts')
-        .update({ name, updated_at: new Date().toISOString() })
+        .update(patch)
         .eq('id', existingContact.id)
     }
     return { contact: existingContact, wasCreated: false }
@@ -1062,32 +1163,136 @@ async function findOrCreateContact(
   // Create new contact. account_id is the tenancy column;
   // user_id is the NOT NULL FK audit column (no inbound message
   // has a single "user who created" it — we attribute to the
-  // WhatsApp config owner as a stable default).
+  // WhatsApp config owner as a stable default). BSUID-only contacts
+  // store phone='' — the empty string is never an identity.
+  const name = displayName || username || phone || ''
   const { data: newContact, error: createError } = await supabaseAdmin()
     .from('contacts')
     .insert({
       account_id: accountId,
       user_id: configOwnerUserId,
-      phone,
-      name: name || phone,
+      phone: phone ?? '',
+      whatsapp_user_id: whatsappUserId ?? null,
+      whatsapp_username: username ?? null,
+      name: name || whatsappUserId || 'WhatsApp user',
     })
     .select()
     .single()
 
   if (createError) {
     // Lost a race: a concurrent inbound delivery (or another path)
-    // created this contact between our lookup and insert, and the
-    // unique index (migration 022) rejected the duplicate. Re-resolve
-    // the existing row instead of dropping the message.
+    // created this contact between our lookup and insert, and a unique
+    // index (022 for phone, 037 for BSUID) rejected the duplicate.
+    // Re-resolve the existing row instead of dropping the message.
     if (isUniqueViolation(createError)) {
-      const raced = await findExistingContact(supabaseAdmin(), accountId, phone)
-      if (raced) return { contact: raced, wasCreated: false }
+      if (whatsappUserId) {
+        const racedBsuid = await findExistingContactByBsuid(
+          supabaseAdmin(),
+          accountId,
+          whatsappUserId,
+        )
+        if (racedBsuid) return { contact: racedBsuid, wasCreated: false }
+      }
+      if (phone) {
+        const raced = await findExistingContact(supabaseAdmin(), accountId, phone)
+        if (raced) return { contact: raced, wasCreated: false }
+      }
     }
     console.error('Error creating contact:', createError)
     return null
   }
 
   return { contact: newContact, wasCreated: true }
+}
+
+/**
+ * Best-effort BSUID rotation for the `system` webhook
+ * (`user_changed_user_id`): match the contact by phone or by its old
+ * BSUID and set the new BSUID. A miss is logged, never thrown.
+ */
+async function rotateContactBsuid(
+  accountId: string,
+  phone: string | null,
+  currentBsuid: string | null,
+  newBsuid: string
+) {
+  const db = supabaseAdmin()
+
+  let matched: { id: string } | null = null
+  if (currentBsuid) {
+    const { data } = await db
+      .from('contacts')
+      .select('id')
+      .eq('account_id', accountId)
+      .eq('whatsapp_user_id', currentBsuid)
+      .maybeSingle()
+    matched = data
+  }
+  if (!matched && phone) {
+    const existing = await findExistingContact(db, accountId, phone)
+    matched = existing ? { id: existing.id } : null
+  }
+
+  if (!matched) {
+    console.warn(
+      '[webhook] system BSUID rotation could not resolve a contact to update',
+      { accountId, phone, newBsuid },
+    )
+    return
+  }
+
+  const { error } = await db
+    .from('contacts')
+    .update({ whatsapp_user_id: newBsuid, updated_at: new Date().toISOString() })
+    .eq('id', matched.id)
+  if (error) {
+    console.error('[webhook] BSUID rotation update failed:', error)
+  }
+}
+
+/**
+ * Handle the `user_id_update` webhook: a user's BSUID changed. Update
+ * contacts in place (previous → current) so threading is preserved.
+ * Account is resolved from the phone_number_id, same as inbound.
+ */
+async function handleUserIdUpdate(
+  value: WhatsAppWebhookEntry['changes'][number]['value'],
+) {
+  const updates = value.user_id_update ?? []
+  if (updates.length === 0) return
+
+  const phoneNumberId = value.metadata.phone_number_id
+  if (!phoneNumberId) return
+
+  const { data: configRows } = await supabaseAdmin()
+    .from('whatsapp_config')
+    .select('account_id')
+    .eq('phone_number_id', phoneNumberId)
+
+  const accountId = configRows?.[0]?.account_id as string | undefined
+  if (!accountId) {
+    console.error(
+      '[webhook] user_id_update: no config for phone_number_id:',
+      phoneNumberId,
+    )
+    return
+  }
+
+  for (const upd of updates) {
+    const prev = upd.user_id?.previous?.trim()
+    const curr = upd.user_id?.current?.trim()
+    if (!prev || !curr || prev === curr) continue
+
+    const { error } = await supabaseAdmin()
+      .from('contacts')
+      .update({ whatsapp_user_id: curr, updated_at: new Date().toISOString() })
+      .eq('account_id', accountId)
+      .eq('whatsapp_user_id', prev)
+
+    if (error) {
+      console.error('[webhook] user_id_update BSUID rotation failed:', error)
+    }
+  }
 }
 
 async function findOrCreateConversation(

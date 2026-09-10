@@ -118,17 +118,21 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
   // new tenancy column.
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone')
+    .select('id, phone, whatsapp_user_id')
     .eq('id', input.contactId)
     .eq('account_id', input.accountId)
     .maybeSingle()
-  if (contactErr || !contact?.phone) {
+  if (contactErr || (!contact?.phone && !contact?.whatsapp_user_id)) {
     throw new Error('contact not found for this account')
   }
 
-  const sanitized = sanitizePhoneForMeta(contact.phone)
-  if (!isValidE164(sanitized)) {
-    throw new Error(`contact phone invalid: ${contact.phone}`)
+  const bsuid = contact?.whatsapp_user_id || null
+  let sanitized = ''
+  if (!bsuid) {
+    sanitized = sanitizePhoneForMeta(contact.phone)
+    if (!isValidE164(sanitized)) {
+      throw new Error(`contact phone invalid: ${contact.phone}`)
+    }
   }
 
   const { data: config, error: configErr } = await db
@@ -142,12 +146,16 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
 
   const accessToken = decrypt(config.access_token)
 
-  const attempt = async (phone: string): Promise<string> => {
+  const attempt = async (
+    to: string | undefined,
+    recipient: string | undefined,
+  ): Promise<string> => {
     if (input.kind === 'template') {
       const r = await sendTemplateMessage({
         phoneNumberId: config.phone_number_id,
         accessToken,
-        to: phone,
+        to,
+        recipient,
         templateName: input.templateName,
         language: input.language,
         params: input.params,
@@ -157,34 +165,38 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     const r = await sendTextMessage({
       phoneNumberId: config.phone_number_id,
       accessToken,
-      to: phone,
+      to,
+      recipient,
       text: input.text,
     })
     return r.messageId
   }
 
-  // Same phone-variant retry as /api/whatsapp/send — Meta sandbox and
-  // numbers registered with/without a trunk 0 both require this to
-  // reliably land a message.
-  const variants = phoneVariants(sanitized)
+  // BSUID sends go in a single attempt (no sanitize / E.164 / variants).
+  // Phone sends keep the variant retry.
   let workingPhone = sanitized
   let waMessageId = ''
   let lastError: unknown = null
-  for (const v of variants) {
-    try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
+  if (bsuid) {
+    waMessageId = await attempt(undefined, bsuid)
+  } else {
+    const variants = phoneVariants(sanitized)
+    for (const v of variants) {
+      try {
+        waMessageId = await attempt(v, undefined)
+        workingPhone = v
+        lastError = null
+        break
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!isRecipientNotAllowedError(msg)) throw err
+        lastError = err
+      }
     }
+    if (lastError) throw lastError
   }
-  if (lastError) throw lastError
 
-  if (workingPhone !== sanitized) {
+  if (!bsuid && workingPhone !== sanitized) {
     await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
   }
 

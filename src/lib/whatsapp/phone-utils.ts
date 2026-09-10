@@ -102,3 +102,13 @@ export function phoneVariants(sanitized: string): string[] {
 export function isRecipientNotAllowedError(message: string): boolean {
   return /131030|not in allowed list|not in the allowed list/i.test(message)
 }
+
+/**
+ * Returns true when Meta rejects a send because BSUID recipients are
+ * not supported for that message type (error code 131062) — e.g.
+ * one-tap / zero-tap / copy-code authentication templates, which still
+ * require a phone number.
+ */
+export function isBsuidNotSupportedError(message: string): boolean {
+  return /131062|not supported for this message/i.test(message)
+}

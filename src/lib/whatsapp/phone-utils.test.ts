@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isBsuidNotSupportedError,
   isRecipientNotAllowedError,
   isValidE164,
   normalizePhone,
@@ -160,5 +161,30 @@ describe("isRecipientNotAllowedError", () => {
       false,
     );
     expect(isRecipientNotAllowedError("")).toBe(false);
+  });
+});
+
+describe("isBsuidNotSupportedError", () => {
+  it("matches Meta error code 131062", () => {
+    expect(
+      isBsuidNotSupportedError(
+        "Business-scoped User ID (BSUID) recipients are not supported for this message. (code 131062)",
+      ),
+    ).toBe(true);
+  });
+
+  it("matches the human-readable text", () => {
+    expect(
+      isBsuidNotSupportedError(
+        "recipients are not supported for this message",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not false-positive on unrelated errors", () => {
+    expect(isBsuidNotSupportedError("(#131030) not in allowed list")).toBe(
+      false,
+    );
+    expect(isBsuidNotSupportedError("")).toBe(false);
   });
 });

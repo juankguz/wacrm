@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   dedupeByPhone,
   findExistingContact,
+  findExistingContactByBsuid,
   isExactMatch,
   isUniqueViolation,
   normalizeKey,
@@ -93,5 +94,37 @@ describe("findExistingContact", () => {
   it("returns null for an empty phone without querying", async () => {
     const db = stubDb([{ id: "c1", phone: "15551234567" }]);
     expect(await findExistingContact(db, "acct", "   ")).toBeNull();
+  });
+});
+
+describe("findExistingContactByBsuid", () => {
+  // The BSUID helper uses .eq().maybeSingle(), not .like() — model that
+  // terminal here.
+  function bsuidDb(
+    row: { id: string; whatsapp_user_id: string } | null,
+  ): SupabaseClient {
+    const builder = {
+      select: () => builder,
+      eq: () => builder,
+      maybeSingle: () => Promise.resolve({ data: row, error: null }),
+    };
+    return { from: () => builder } as unknown as SupabaseClient;
+  }
+
+  it("returns the contact matching the BSUID", async () => {
+    const db = bsuidDb({ id: "c1", whatsapp_user_id: "US.123" });
+    const hit = await findExistingContactByBsuid(db, "acct", "US.123");
+    expect(hit?.id).toBe("c1");
+  });
+
+  it("returns null when no BSUID matches", async () => {
+    const db = bsuidDb(null);
+    expect(await findExistingContactByBsuid(db, "acct", "US.999")).toBeNull();
+  });
+
+  it("returns null for an empty BSUID without querying", async () => {
+    const db = bsuidDb({ id: "c1", whatsapp_user_id: "US.123" });
+    expect(await findExistingContactByBsuid(db, "acct", "")).toBeNull();
+    expect(await findExistingContactByBsuid(db, "acct", "   ")).toBeNull();
   });
 });

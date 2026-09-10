@@ -182,8 +182,14 @@ export function ConversationList({
       result = result.filter((c) => {
         const name = c.contact?.name?.toLowerCase() ?? "";
         const phone = c.contact?.phone?.toLowerCase() ?? "";
+        const username = c.contact?.whatsapp_username?.toLowerCase() ?? "";
         const lastMsg = c.last_message_text?.toLowerCase() ?? "";
-        return name.includes(q) || phone.includes(q) || lastMsg.includes(q);
+        return (
+          name.includes(q) ||
+          phone.includes(q) ||
+          username.includes(q) ||
+          lastMsg.includes(q)
+        );
       });
     }
 
@@ -437,7 +443,8 @@ function ConversationItem({
   t,
 }: ConversationItemProps) {
   const contact = conversation.contact;
-  const displayName = contact?.name || contact?.phone || t("unknown");
+  const displayName =
+    contact?.name || contact?.whatsapp_username || contact?.phone || t("unknown");
   const initials = displayName.charAt(0).toUpperCase();
 
   const handleClick = useCallback(() => {

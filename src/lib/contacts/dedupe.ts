@@ -23,6 +23,7 @@ export interface ExistingContact {
   id: string;
   phone: string;
   name?: string | null;
+  whatsapp_user_id?: string | null;
   [key: string]: unknown;
 }
 
@@ -53,6 +54,32 @@ export async function findExistingContact(
   return (
     (data as ExistingContact[]).find((c) => phonesMatch(c.phone, phone)) ?? null
   );
+}
+
+/**
+ * Find an existing contact in `accountId` by its WhatsApp Business-
+ * scoped User ID (BSUID), or null. The BSUID is Meta's new stable
+ * identity for users whose phone number may not appear in webhooks;
+ * it's scoped to the business portfolio, so lookup is always
+ * (account_id, whatsapp_user_id). Empty BSUID → null (no match).
+ */
+export async function findExistingContactByBsuid(
+  db: SupabaseClient,
+  accountId: string,
+  bsuid: string,
+): Promise<ExistingContact | null> {
+  const trimmed = bsuid?.trim();
+  if (!trimmed) return null;
+
+  const { data, error } = await db
+    .from("contacts")
+    .select("*")
+    .eq("account_id", accountId)
+    .eq("whatsapp_user_id", trimmed)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data as ExistingContact;
 }
 
 /**
