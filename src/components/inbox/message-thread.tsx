@@ -27,6 +27,8 @@ import {
   RefreshCw,
   PanelRightOpen,
   PanelRightClose,
+  Trash2,
+  Loader2,
 } from "lucide-react";
 import { format, isToday, isYesterday, differenceInHours } from "date-fns";
 import { useTranslations } from "next-intl";
@@ -39,6 +41,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { useCan } from "@/hooks/use-can";
 import { MessageBubble } from "./message-bubble";
 import { MessageActions } from "./message-actions";
 import {
@@ -109,6 +121,12 @@ interface MessageThreadProps {
    */
   contactPanelOpen?: boolean;
   onToggleContactPanel?: () => void;
+  /**
+   * Fired after the conversation is permanently deleted (via the header's
+   * trash button). The page removes the row from the list and, if it was
+   * the active thread, deselects it.
+   */
+  onDeleted?: (conversationId: string) => void;
 }
 
 function formatDateSeparator(dateStr: string, t: ReturnType<typeof useTranslations>): string {
@@ -167,6 +185,7 @@ export function MessageThread({
   onRefresh,
   contactPanelOpen,
   onToggleContactPanel,
+  onDeleted,
 }: MessageThreadProps) {
   const t = useTranslations("Inbox.messageThread");
   const tTimer = useTranslations("Inbox.sessionTimer");
@@ -202,6 +221,12 @@ export function MessageThread({
     }, 700);
   }, [isRefreshing, onRefresh]);
   const [replyTo, setReplyTo] = useState<ReplyDraft | null>(null);
+
+  // Delete-conversation affordance. Only write roles (agent+) see the
+  // trash button; the DELETE route enforces the same role server-side.
+  const canDelete = useCan("send-messages");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Profiles are bounded by RLS to rows the current user is allowed to
   // see — today that's just the current user, but the dropdown keeps the
@@ -636,6 +661,30 @@ export function MessageThread({
     [conversation, onStatusChange]
   );
 
+  const handleDeleteConversation = useCallback(async () => {
+    if (!conversation) return;
+    setDeleting(true);
+
+    try {
+      const res = await fetch(`/api/conversations/${conversation.id}`, {
+        method: "DELETE",
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+
+      toast.success(t("deleteConversationToast"));
+      onDeleted?.(conversation.id);
+      setDeleteOpen(false);
+    } catch (err) {
+      console.error("Failed to delete conversation:", err);
+      toast.error(t("deleteConversationFailed"));
+    } finally {
+      setDeleting(false);
+    }
+  }, [conversation, onDeleted, t]);
+
   const handleOpenTemplates = useCallback(() => {
     setTemplateModalOpen(true);
   }, []);
@@ -969,6 +1018,23 @@ export function MessageThread({
             </button>
           )}
 
+          {/* Delete conversation — permanent, destructive. Only write
+              roles (agent+) see it; the confirm dialog guards accidents. */}
+          {canDelete && (
+            <button
+              type="button"
+              onClick={() => setDeleteOpen(true)}
+              disabled={deleting}
+              aria-label={t("deleteConversationTitle")}
+              title={t("deleteConversationTitle")}
+              className={cn(
+                "inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-60",
+              )}
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          )}
+
           {/* Status dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger className={cn(
@@ -1170,6 +1236,37 @@ export function MessageThread({
         onOpenChange={setTemplateModalOpen}
         onSelect={handleSendTemplate}
       />
+
+      {/* Delete-conversation confirmation */}
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent className="border-border bg-popover text-popover-foreground sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-popover-foreground">
+              {t("deleteConversationTitle")}
+            </DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              {t("deleteConversationDesc")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="bg-popover border-border">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteOpen(false)}
+              className="border-border text-muted-foreground hover:bg-muted"
+            >
+              {t("cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteConversation}
+              disabled={deleting}
+            >
+              {deleting && <Loader2 className="size-4 animate-spin" />}
+              {t("deleteConversationBtn")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

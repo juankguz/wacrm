@@ -167,7 +167,13 @@
       "selectConversationHint": "왼쪽에서 대화를 선택해 메시지를 시작하세요",
       "today": "오늘",
       "yesterday": "어제",
-      "whatsappUser": "WhatsApp 사용자"
+      "whatsappUser": "WhatsApp 사용자",
+      "cancel": "취소",
+      "deleteConversationTitle": "대화 삭제",
+      "deleteConversationDesc": "대화와 그 안의 메시지가 영구적으로 삭제됩니다. 연락처는 유지됩니다. 이 작업은 되돌릴 수 없습니다.",
+      "deleteConversationBtn": "삭제",
+      "deleteConversationToast": "대화가 삭제되었습니다",
+      "deleteConversationFailed": "대화를 삭제하지 못했습니다"
     },
     "sessionTimer": {
       "expired": "만료됨",

@@ -501,6 +501,22 @@ function InboxPageInner() {
     router.replace("/inbox", { scroll: false });
   }, [router]);
 
+  // A conversation was permanently deleted from the thread header. Drop
+  // it from the list and, if it was the open thread, deselect it.
+  const handleDeleted = useCallback(
+    (conversationId: string) => {
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+      if (activeConversation?.id === conversationId) {
+        setActiveConversation(null);
+        setActiveContact(null);
+        setMessages([]);
+        autoSelectedForDeepLinkRef.current = null;
+        router.replace("/inbox", { scroll: false });
+      }
+    },
+    [activeConversation?.id, router]
+  );
+
 
   const handleMessagesLoaded = useCallback((loaded: Message[]) => {
     setMessages(loaded);
@@ -623,6 +639,7 @@ function InboxPageInner() {
             onRefresh={handleManualRefresh}
             contactPanelOpen={contactPanelOpen}
             onToggleContactPanel={handleToggleContactPanel}
+            onDeleted={handleDeleted}
           />
         </div>
 

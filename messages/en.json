@@ -167,7 +167,13 @@
       "selectConversationHint": "Choose a conversation from the left to start messaging",
       "today": "Today",
       "yesterday": "Yesterday",
-      "whatsappUser": "WhatsApp user"
+      "whatsappUser": "WhatsApp user",
+      "cancel": "Cancel",
+      "deleteConversationTitle": "Delete conversation",
+      "deleteConversationDesc": "This permanently deletes the conversation and its messages. The contact is kept. This cannot be undone.",
+      "deleteConversationBtn": "Delete",
+      "deleteConversationToast": "Conversation deleted",
+      "deleteConversationFailed": "Could not delete conversation"
     },
     "sessionTimer": {
       "expired": "Expired",
