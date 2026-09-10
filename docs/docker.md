@@ -22,7 +22,7 @@ is included.
    docker compose --env-file .env.local up --build -d
    ```
 
-3. The app is served on [http://localhost:3000](http://localhost:3000)
+3. The app is served on [http://localhost:3009](http://localhost:3009)
    (publish it elsewhere with `HOST_PORT=8080` in `.env.local`).
 
 > Use `HOST_PORT`, not `PORT`, to move the published port. `PORT` is
